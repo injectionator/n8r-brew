@@ -1,8 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/injectionator/n8r/internal/auth"
@@ -33,6 +37,8 @@ func main() {
 		cmdLogout()
 	case "status":
 		cmdStatus()
+	case "profile":
+		cmdProfile()
 	case "version", "--version", "-v":
 		fmt.Printf("n8r v%s\n", config.Version)
 	case "help", "--help", "-h":
@@ -74,8 +80,129 @@ func printUsage() {
 	fmt.Println("  n8r login          Authenticate with Injectionator")
 	fmt.Println("  n8r logout         Remove stored credentials")
 	fmt.Println("  n8r status         Show authentication status")
-	fmt.Println("  n8r inspect        Inspect your injectionator")
+	fmt.Println("  n8r profile        View your Injectionator profile")
 	fmt.Println("  n8r version        Print version")
+	fmt.Println()
+}
+
+func requireToken() *auth.StoredToken {
+	token, err := auth.LoadToken()
+	if err != nil || token == nil || token.IsExpired() {
+		fmt.Fprintln(os.Stderr, "You must be logged in to use this command.")
+		fmt.Fprintln(os.Stderr, "Run `n8r login` to authenticate.")
+		os.Exit(1)
+	}
+	return token
+}
+
+func cmdProfile() {
+	token := requireToken()
+
+	req, err := http.NewRequest("GET", config.BaseURL+"/api/auth/profile", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	req.Header.Set("Origin", config.BaseURL)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading response: %v\n", err)
+		os.Exit(1)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		fmt.Fprintln(os.Stderr, "Session expired. Run `n8r login` to re-authenticate.")
+		os.Exit(1)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Error (HTTP %d): %s\n", resp.StatusCode, string(body))
+		os.Exit(1)
+	}
+
+	var profile struct {
+		User struct {
+			Email        string   `json:"email"`
+			Name         string   `json:"name"`
+			Role         string   `json:"role"`
+			Organization string   `json:"organization"`
+			Interests    []string `json:"interests"`
+		} `json:"user"`
+		Cohorts     []string `json:"cohorts"`
+		Points      int      `json:"points"`
+		AlphaAccess bool     `json:"alpha_access"`
+		Badges      []struct {
+			Name    string `json:"name"`
+			Emoji   string `json:"emoji"`
+			Mission string `json:"mission"`
+		} `json:"badges"`
+		Missions struct {
+			Completed int `json:"completed"`
+			Total     int `json:"total"`
+		} `json:"missions"`
+	}
+
+	if err := json.Unmarshal(body, &profile); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing profile: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Print(banner)
+	fmt.Println(" Your Injectionator Profile")
+	fmt.Println(" ──────────────────────────")
+	fmt.Println()
+
+	name := profile.User.Name
+	if name == "" {
+		name = "(not set)"
+	}
+	fmt.Printf("  Name:         %s\n", name)
+	fmt.Printf("  Email:        %s\n", profile.User.Email)
+
+	if profile.User.Role != "" {
+		fmt.Printf("  Role:         %s\n", profile.User.Role)
+	}
+	if profile.User.Organization != "" {
+		fmt.Printf("  Organization: %s\n", profile.User.Organization)
+	}
+	if len(profile.User.Interests) > 0 {
+		fmt.Printf("  Interests:    %s\n", strings.Join(profile.User.Interests, ", "))
+	}
+
+	fmt.Println()
+
+	if len(profile.Cohorts) > 0 {
+		fmt.Printf("  Cohorts:      %s\n", strings.Join(profile.Cohorts, ", "))
+	}
+	if profile.AlphaAccess {
+		fmt.Println("  Alpha Access: Yes")
+	}
+
+	fmt.Println()
+	fmt.Printf("  Points:       %d\n", profile.Points)
+	fmt.Printf("  Missions:     %d/%d completed\n", profile.Missions.Completed, profile.Missions.Total)
+
+	if len(profile.Badges) > 0 {
+		fmt.Println()
+		fmt.Println("  Badges:")
+		for _, b := range profile.Badges {
+			emoji := b.Emoji
+			if emoji == "" {
+				emoji = " "
+			}
+			fmt.Printf("    %s %s (%s)\n", emoji, b.Name, b.Mission)
+		}
+	}
+
 	fmt.Println()
 }
 
